@@ -1,0 +1,169 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum IssueType {
+  TASK
+  BUG
+  STORY
+  EPIC
+}
+
+enum StatusCategory {
+  TODO
+  IN_PROGRESS
+  DONE
+}
+
+// ─────────────────────────────────────────────
+// AUTH
+// ─────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  name      String?
+  email     String   @unique
+  password  String
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  refreshTokens  RefreshToken[]
+  projectMembers ProjectMember[]
+  ownedProjects  Project[]       @relation("ProjectOwner")
+  assignedIssues Issue[]         @relation("IssueAssignee")
+  reportedIssues Issue[]         @relation("IssueReporter")
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique  // SHA-256 hash — never store raw token
+  expiresAt DateTime
+  revokedAt DateTime?           // NULL = active, SET = rotated or logged out
+  createdAt DateTime  @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────
+// PROJECTS
+// ─────────────────────────────────────────────
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  key         String   @unique  // e.g. "PROJ" — used in issue keys like PROJ-1
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner   User   @relation("ProjectOwner", fields: [ownerId], references: [id])
+  ownerId String
+
+  // Relations
+  members  ProjectMember[]
+  statuses Status[]
+  issues   Issue[]
+
+  @@index([ownerId])
+}
+
+model ProjectMember {
+  role     Role     @default(MEMBER)
+  joinedAt DateTime @default(now())
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+
+  @@id([projectId, userId])  // Composite PK — prevents duplicate memberships
+  @@index([userId])           // Fast: "all projects this user belongs to"
+}
+
+// ─────────────────────────────────────────────
+// BOARD COLUMNS (STATUSES)
+// ─────────────────────────────────────────────
+
+model Status {
+  id        String         @id @default(cuid())
+  name      String                              // e.g. "In Progress"
+  color     String         @default("#888888")  // Hex color for column header
+  position  Int                                 // Display order on board
+  category  StatusCategory @default(TODO)       // Used for reporting & velocity
+  isDefault Boolean        @default(false)      // New issues land here if true
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String
+
+  issues Issue[]
+
+  @@index([projectId, position])  // Fast: ordered column list per project
+}
+
+// ─────────────────────────────────────────────
+// ISSUES
+// ─────────────────────────────────────────────
+
+model Issue {
+  id          String    @id @default(cuid())
+  key         String    @unique
+  title       String
+  description String?               // ✅ Fix 2: String? for Phase 1, migrate to Json? in Phase 2
+  type        IssueType @default(TASK)
+  priority    Priority  @default(MEDIUM)
+  storyPoints Int?
+  dueDate     DateTime?
+  position    Float     @default(0) // ✅ Fix 1: default so no insert ever fails
+  deletedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String
+
+  status   Status @relation(fields: [statusId], references: [id], onDelete: Restrict) // ✅ Fix 3
+  statusId String
+
+  assignee   User?   @relation("IssueAssignee", fields: [assigneeId], references: [id])
+  assigneeId String?
+
+  reporter   User   @relation("IssueReporter", fields: [reporterId], references: [id])
+  reporterId String
+
+  @@index([projectId, statusId, deletedAt])
+  @@index([assigneeId])
+  @@index([createdAt(sort: Desc)])
+  @@index([projectId, key])
+}
