@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Issue" ALTER COLUMN "description" SET DATA TYPE TEXT,
+ALTER COLUMN "position" SET DEFAULT 0;

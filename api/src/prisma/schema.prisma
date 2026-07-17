@@ -1,0 +1,464 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum ProjectType {
+  SOFTWARE
+  BUSINESS
+  MARKETING
+}
+
+enum ProjectTemplate {
+  KANBAN
+  SCRUM
+  BLANK
+}
+
+enum ProjectVisibility {
+  PRIVATE
+  PUBLIC
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum IssueType {
+  TASK
+  BUG
+  STORY
+  EPIC
+}
+
+enum StatusCategory {
+  TODO
+  IN_PROGRESS
+  DONE
+}
+
+// ─────────────────────────────────────────────
+// AUTH
+// ─────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(cuid())
+  name          String?
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  password      String
+  avatarUrl     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  refreshTokens  RefreshToken[]
+  projectMembers ProjectMember[]
+  ownedProjects  Project[]       @relation("ProjectOwner")
+  assignedIssues Issue[]         @relation("IssueAssignee")
+  reportedIssues Issue[]         @relation("IssueReporter")
+  comments       Comment[]
+
+  attachments Attachment[]
+
+  activities Activity[]
+
+  watching           IssueWatcher[]
+  worklogs           Worklog[]
+  savedFilters       SavedFilter[]
+  notifications      Notification[]
+  projectInvitations ProjectInvitation[]
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique // SHA-256 hash — never store raw token
+  expiresAt DateTime
+  revokedAt DateTime? // NULL = active, SET = rotated or logged out
+  createdAt DateTime  @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────
+// PROJECTS
+// ─────────────────────────────────────────────
+model Project {
+  id String @id @default(cuid())
+
+  name        String
+  key         String            @unique
+  description String?
+  epics       Epic[]
+  // Jira-like configuration
+  type        ProjectType       @default(SOFTWARE)
+  template    ProjectTemplate   @default(KANBAN)
+  visibility  ProjectVisibility @default(PRIVATE)
+
+  icon  String? // Emoji or uploaded icon URL
+  color String? // Example: "#2563EB"
+
+  archived Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner   User   @relation("ProjectOwner", fields: [ownerId], references: [id])
+  ownerId String
+
+  members            ProjectMember[]
+  statuses           Status[]
+  issues             Issue[]
+  sprints            Sprint[]
+  labels             Label[]
+  projectInvitations ProjectInvitation[]
+
+  @@index([ownerId])
+  @@index([visibility])
+  @@index([type])
+}
+
+model Epic {
+  id String @id @default(cuid())
+
+  name String
+
+  key String @unique
+
+  description String?
+
+  color String?
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  issues Issue[]
+
+  createdAt DateTime @default(now())
+}
+
+model IssueWatcher {
+  issueId String
+
+  userId String
+
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([issueId, userId])
+}
+
+model Activity {
+  id String @id @default(cuid())
+
+  action String
+
+  valueBefore String?
+
+  valueAfter String?
+
+  createdAt DateTime @default(now())
+
+  issueId String
+  issue   Issue  @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+}
+
+model ProjectMember {
+  role Role @default(MEMBER)
+
+  invitedAt DateTime @default(now())
+  joinedAt  DateTime @default(now())
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+
+  @@id([projectId, userId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────
+// BOARD COLUMNS (STATUSES)
+// ─────────────────────────────────────────────
+model Status {
+  id String @id @default(cuid())
+
+  name  String
+  color String @default("#888888")
+
+  position Int
+
+  category StatusCategory @default(TODO)
+
+  isDefault Boolean @default(false)
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String
+
+  issues Issue[]
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId, position])
+}
+
+model Worklog {
+  id String @id @default(cuid())
+
+  description String?
+
+  minutes Int
+
+  issueId String
+  issue   Issue  @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+}
+
+model SavedFilter {
+  id String @id @default(cuid())
+
+  name String
+
+  query String
+
+  userId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
+
+model Notification {
+  id String @id @default(cuid())
+
+  title String
+
+  message String
+
+  read Boolean @default(false)
+
+  userId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+model ProjectInvitation {
+  id String @id @default(cuid())
+
+  email String
+
+  role Role
+
+  status InvitationStatus @default(PENDING)
+
+  token String @unique
+
+  expiresAt DateTime
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  invitedById String
+  invitedBy   User   @relation(fields: [invitedById], references: [id])
+
+  createdAt DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────
+// ISSUES
+// ─────────────────────────────────────────────
+model Issue {
+  id String @id @default(cuid())
+
+  key String @unique
+
+  title String
+
+  worklogs    Worklog[]
+  description String?
+  checklist   ChecklistItem[]
+
+  type     IssueType @default(TASK)
+  epicId   String?
+  epic     Epic?     @relation(fields: [epicId], references: [id])
+  priority Priority  @default(MEDIUM)
+
+  storyPoints Int?
+
+  dueDate  DateTime?
+  parentId String?
+
+  parent Issue? @relation("IssueHierarchy", fields: [parentId], references: [id])
+
+  children Issue[] @relation("IssueHierarchy")
+
+  position Float @default(0)
+
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String
+
+  status   Status @relation(fields: [statusId], references: [id], onDelete: Restrict)
+  statusId String
+
+  assignee   User?   @relation("IssueAssignee", fields: [assigneeId], references: [id])
+  assigneeId String?
+
+  reporter      User           @relation("IssueReporter", fields: [reporterId], references: [id])
+  reporterId    String
+  issueWatchers IssueWatcher[]
+  activities    Activity[]
+  issueLabels   IssueLabel[]
+  attachments   Attachment[]
+  comments      Comment[]
+  sprint        Sprint?        @relation(fields: [sprintId], references: [id])
+  sprintId      String?
+
+  @@index([projectId, statusId, deletedAt])
+  @@index([assigneeId])
+  @@index([createdAt(sort: Desc)])
+  @@index([projectId, key])
+}
+
+model ChecklistItem {
+  id String @id @default(cuid())
+
+  title String
+
+  completed Boolean @default(false)
+
+  position Int
+
+  issueId String
+  issue   Issue  @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
+
+model Label {
+  id String @id @default(cuid())
+
+  name  String
+  color String
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  issues IssueLabel[]
+}
+
+model IssueLabel {
+  issueId String
+  labelId String
+
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  label Label @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([issueId, labelId])
+}
+
+model Attachment {
+  id String @id @default(cuid())
+
+  url String
+
+  fileName String
+
+  size Int
+
+  mimeType String
+
+  uploadedAt DateTime @default(now())
+
+  issueId String
+
+  issue  Issue   @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  user   User?   @relation(fields: [userId], references: [id])
+  userId String?
+}
+
+model Comment {
+  id String @id @default(cuid())
+
+  body String
+
+  createdAt DateTime @default(now())
+
+  updatedAt DateTime @updatedAt
+
+  issueId String
+
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  authorId String
+
+  author User @relation(fields: [authorId], references: [id])
+}
+
+model Sprint {
+  id String @id @default(cuid())
+
+  name String
+
+  goal String?
+
+  startDate DateTime?
+
+  endDate DateTime?
+
+  active Boolean @default(false)
+
+  completed Boolean @default(false)
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  issues Issue[]
+
+  createdAt DateTime @default(now())
+}
