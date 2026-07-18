@@ -13,5 +13,5 @@
     "skipLibCheck": true
   },
 
-  "include": ["src"]
+  "include": ["src", "../changes/api/src/routes/comments.ts"]
 }

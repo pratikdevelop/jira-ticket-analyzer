@@ -33,11 +33,10 @@ export class AuthService {
     const normalizedEmail = email.trim().toLowerCase();
 
     const existingUser = await prisma.user.findUnique({
-      where: {
-        email: normalizedEmail,
-      },
-    });
-
+  where: {
+    email: normalizedEmail,
+  },
+});
     if (existingUser) {
       throw new Error("User already exists");
     }
@@ -459,4 +458,58 @@ export class AuthService {
         "Verification email sent.",
     };
   }
+
+  static async updateProfile(userId: string, name: string) {
+  return prisma.user.update({
+    where: { id: userId },
+    data: {
+      name,
+    },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      avatarUrl: true,
+      updatedAt: true,
+    },
+  });
+}
+static async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string
+) {
+
+    const user = await prisma.user.findUnique({
+        where:{id:userId}
+    });
+
+    if(!user)
+        throw new Error("User not found");
+
+    const matched = await comparePassword(
+        currentPassword,
+        user.password
+    );
+
+    if(!matched)
+        throw new Error("Incorrect current password");
+
+    const hash = await hashPassword(newPassword);
+
+    await prisma.user.update({
+        where:{id:userId},
+        data:{
+            password:hash
+        }
+    });
+
+    await prisma.refreshToken.deleteMany({
+        where:{userId}
+    });
+
+    return {
+        message:"Password changed successfully"
+    };
+}
 }

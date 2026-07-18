@@ -2,8 +2,16 @@
 import { Router } from 'express';
 import prisma from '../config/prisma.js';
 import { protect, AuthRequest } from '../middleware/auth.js';
+import { emitToProject } from '../../../api/src/socket.js';
+import { notifyUser } from '../../../api/src/services/notification.service.js';
 
 const router = Router();
+
+const ISSUE_INCLUDE = {
+    status: { select: { id: true, name: true, color: true, category: true } },
+    assignee: { select: { id: true, name: true, email: true, avatarUrl: true } },
+    reporter: { select: { id: true, name: true, email: true, avatarUrl: true } },
+};
 
 // ── Helper Functions ─────────────────────────────────────────────
 
@@ -102,12 +110,18 @@ router.post('/create', protect, async (req: any, res) => {
                 reporterId: req.user.userId,
                 assigneeId: assigneeId ?? null,
             },
-            include: {
-                status: { select: { id: true, name: true, color: true, category: true } },
-                assignee: { select: { id: true, name: true, email: true, avatarUrl: true } },
-                reporter: { select: { id: true, name: true, email: true, avatarUrl: true } },
-            },
+            include: ISSUE_INCLUDE,
         });
+
+        emitToProject(projectId, "issue:created", issue);
+
+        if (issue.assigneeId && issue.assigneeId !== req.user.userId) {
+            notifyUser(
+                issue.assigneeId,
+                "New task assigned",
+                `You were assigned to ${issue.key}: ${issue.title}`
+            ).catch((err) => console.error("[createIssue] notify failed", err));
+        }
 
         return res.status(201).json({ data: issue, success: true, message: "Issue created successfully." });
 
@@ -144,17 +158,48 @@ router.get('/', protect, async (req: any, res) => {
                 ...(q && { title: { contains: q as string, mode: "insensitive" } }),
             },
             orderBy: { position: "asc" },
-            include: {
-                status: { select: { id: true, name: true, color: true, category: true } },
-                assignee: { select: { id: true, name: true, email: true, avatarUrl: true } },
-                reporter: { select: { id: true, name: true, email: true, avatarUrl: true } },
-            },
+            include: ISSUE_INCLUDE,
         });
 
         return res.json({ data: issues, success: true });
 
     } catch (error: any) {
         console.error("[getIssues]", error);
+        return res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "An unexpected error occurred." } });
+    }
+});
+
+// ── GET SINGLE ISSUE ──────────────────────────────────────────────
+router.get('/:issueId', protect, async (req: any, res) => {
+    try {
+        const { issueId } = req.params;
+
+        const issue = await prisma.issue.findUnique({
+            where: { id: issueId },
+            include: {
+                ...ISSUE_INCLUDE,
+                project: { select: { id: true, name: true, key: true } },
+                comments: {
+                    orderBy: { createdAt: "asc" },
+                    include: { author: { select: { id: true, name: true, email: true, avatarUrl: true } } },
+                },
+            },
+        });
+        if (!issue || issue.deletedAt) {
+            return res.status(404).json({ error: { code: "NOT_FOUND", message: "Issue not found." } });
+        }
+
+        const membership = await prisma.projectMember.findUnique({
+            where: { projectId_userId: { projectId: issue.projectId, userId: req.user.userId } },
+        });
+        if (!membership) {
+            return res.status(403).json({ error: { code: "FORBIDDEN", message: "You are not a member of this project." } });
+        }
+
+        return res.json({ data: issue, success: true });
+
+    } catch (error: any) {
+        console.error("[getIssueById]", error);
         return res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "An unexpected error occurred." } });
     }
 });
@@ -170,21 +215,33 @@ router.patch('/move', protect, async (req: AuthRequest, res) => {
 
         const issue = await prisma.issue.findUnique({
             where: { id: issueId },
-            select: { id: true, projectId: true, deletedAt: true },
+            select: { id: true, projectId: true, deletedAt: true, statusId: true },
         });
         if (!issue || issue.deletedAt) {
             return res.status(404).json({ error: { code: "NOT_FOUND", message: "Issue not found." } });
         }
 
-        // ... (same membership + status validation as before)
+        const membership = await prisma.projectMember.findUnique({
+            where: { projectId_userId: { projectId: issue.projectId, userId: req.user!.userId } },
+        });
+        if (!membership) {
+            return res.status(403).json({ error: { code: "FORBIDDEN", message: "You are not a member of this project." } });
+        }
+
+        const status = await prisma.status.findFirst({ where: { id: statusId, projectId: issue.projectId } });
+        if (!status) {
+            return res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "statusId does not belong to this project." } });
+        }
 
         const resolvedPosition = position ?? await getNextPosition(issue.projectId, statusId);
 
         const updated = await prisma.issue.update({
             where: { id: issueId },
             data: { statusId, position: resolvedPosition, updatedAt: new Date() },
-            include: { /* same include as before */ },
+            include: ISSUE_INCLUDE,
         });
+
+        emitToProject(issue.projectId, "issue:moved", updated);
 
         return res.json({ data: updated, success: true });
 
@@ -194,6 +251,104 @@ router.patch('/move', protect, async (req: AuthRequest, res) => {
     }
 });
 
-// Add the remaining routes (`update` and `delete`) if needed — let me know and I'll complete them.
+// ── UPDATE ISSUE (partial update) ─────────────────────────────────
+router.patch('/update', protect, async (req: AuthRequest, res) => {
+    try {
+        const { issueId, ...updates } = req.body;
+
+        if (!issueId) {
+            return res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "issueId is required." } });
+        }
+
+        const issue = await prisma.issue.findUnique({
+            where: { id: issueId },
+            select: { id: true, projectId: true, deletedAt: true, assigneeId: true },
+        });
+        if (!issue || issue.deletedAt) {
+            return res.status(404).json({ error: { code: "NOT_FOUND", message: "Issue not found." } });
+        }
+
+        const membership = await prisma.projectMember.findUnique({
+            where: { projectId_userId: { projectId: issue.projectId, userId: req.user!.userId } },
+        });
+        if (!membership) {
+            return res.status(403).json({ error: { code: "FORBIDDEN", message: "You are not a member of this project." } });
+        }
+
+        const allowedFields = ["title", "description", "type", "priority", "assigneeId", "storyPoints", "dueDate", "statusId"];
+        const safeUpdates: Record<string, any> = {};
+        for (const field of allowedFields) {
+            if (updates[field] !== undefined) safeUpdates[field] = updates[field];
+        }
+
+        if (safeUpdates.title && safeUpdates.title.trim().length < 2) {
+            return res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "Title must be at least 2 characters." } });
+        }
+        if (safeUpdates.dueDate) safeUpdates.dueDate = new Date(safeUpdates.dueDate);
+
+        const updated = await prisma.issue.update({
+            where: { id: issueId },
+            data: { ...safeUpdates, updatedAt: new Date() },
+            include: ISSUE_INCLUDE,
+        });
+
+        emitToProject(issue.projectId, "issue:updated", updated);
+
+        // Notify newly assigned user (assignment changed to someone new)
+        const newAssignee = safeUpdates.assigneeId;
+        if (newAssignee && newAssignee !== issue.assigneeId && newAssignee !== req.user!.userId) {
+            notifyUser(
+                newAssignee,
+                "New task assigned",
+                `You were assigned to ${updated.key}: ${updated.title}`
+            ).catch((err) => console.error("[updateIssue] notify failed", err));
+        }
+
+        return res.json({ data: updated, success: true });
+
+    } catch (error: any) {
+        console.error("[updateIssue]", error);
+        return res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "An unexpected error occurred." } });
+    }
+});
+
+// ── DELETE ISSUE (soft delete) ─────────────────────────────────────
+router.post('/delete', protect, async (req: AuthRequest, res) => {
+    try {
+        const { issueId } = req.body;
+
+        if (!issueId) {
+            return res.status(400).json({ error: { code: "VALIDATION_ERROR", message: "issueId is required." } });
+        }
+
+        const issue = await prisma.issue.findUnique({
+            where: { id: issueId },
+            select: { id: true, projectId: true, deletedAt: true },
+        });
+        if (!issue || issue.deletedAt) {
+            return res.status(404).json({ error: { code: "NOT_FOUND", message: "Issue not found." } });
+        }
+
+        const membership = await prisma.projectMember.findUnique({
+            where: { projectId_userId: { projectId: issue.projectId, userId: req.user!.userId } },
+        });
+        if (!membership) {
+            return res.status(403).json({ error: { code: "FORBIDDEN", message: "You are not a member of this project." } });
+        }
+
+        await prisma.issue.update({
+            where: { id: issueId },
+            data: { deletedAt: new Date() },
+        });
+
+        emitToProject(issue.projectId, "issue:deleted", { issueId });
+
+        return res.json({ success: true, message: "Issue deleted." });
+
+    } catch (error: any) {
+        console.error("[deleteIssue]", error);
+        return res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "An unexpected error occurred." } });
+    }
+});
 
 export default router;
